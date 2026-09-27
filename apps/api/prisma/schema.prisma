@@ -1,0 +1,362 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  pending
+  active
+  suspended
+}
+
+enum KycStatus {
+  not_started
+  pending
+  approved
+  rejected
+}
+
+enum MemberRole {
+  owner
+  admin
+  staff
+}
+
+enum ProductStatus {
+  draft
+  active
+  archived
+}
+
+enum OrderStatus {
+  draft
+  awaiting_payment
+  paid
+  expired
+  cancelled
+  fulfilled
+  refunded
+}
+
+enum PaymentStatus {
+  pending
+  succeeded
+  failed
+  cancelled
+  refunded
+}
+
+enum RefundStatus {
+  pending
+  pending_manual
+  succeeded
+  failed
+}
+
+enum LedgerEntryType {
+  sale
+  platform_fee
+  refund
+  payout
+  adjustment
+}
+
+enum LedgerDirection {
+  credit
+  debit
+}
+
+enum PayoutStatus {
+  requested
+  processing
+  paid
+  failed
+}
+
+model Tenant {
+  id              String       @id @default(uuid()) @db.Uuid
+  slug            String       @unique
+  legalName       String
+  countryCode     String       @db.Char(2)
+  defaultCurrency String       @default("XOF")
+  status          TenantStatus @default(pending)
+  kycStatus       KycStatus    @default(not_started)
+  /// Wallet Wave / Orange Money crédité lors des reversements.
+  payoutWallet    String?
+  payoutMethod    String?
+  createdAt       DateTime     @default(now())
+
+  domains        Domain[]
+  memberships    Membership[]
+  products       Product[]
+  customers      Customer[]
+  orders         Order[]
+  paymentConfigs TenantPaymentConfig[]
+  ledgerEntries  LedgerEntry[]
+  payouts        Payout[]
+
+  @@map("tenants")
+}
+
+model Domain {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @db.Uuid
+  hostname  String  @unique
+  isPrimary Boolean @default(false)
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("domains")
+}
+
+model User {
+  id              String       @id @default(uuid()) @db.Uuid
+  email           String       @unique
+  phone           String?
+  passwordHash    String
+  isPlatformAdmin Boolean      @default(false)
+  createdAt       DateTime     @default(now())
+  memberships     Membership[]
+
+  @@map("users")
+}
+
+model Membership {
+  id       String     @id @default(uuid()) @db.Uuid
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  role     MemberRole @default(staff)
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@map("memberships")
+}
+
+model Product {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @db.Uuid
+  title       String
+  slug        String
+  description String?
+  status      ProductStatus @default(draft)
+  imageUrl    String?
+  createdAt   DateTime      @default(now())
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variants    Variant[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+  @@map("products")
+}
+
+model Variant {
+  id          String      @id @default(uuid()) @db.Uuid
+  tenantId    String      @db.Uuid
+  productId   String      @db.Uuid
+  sku         String
+  title       String
+  priceMinor  Int
+  currency    String      @default("XOF")
+  stock       Int         @default(0)
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  orderItems  OrderItem[]
+
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+  @@map("variants")
+}
+
+model Customer {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  email     String?
+  /// E.164 : identité principale du client sur le rail mobile money.
+  phone     String?
+  fullName  String?
+  createdAt DateTime @default(now())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orders    Order[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+  @@map("customers")
+}
+
+model Order {
+  id             String      @id @default(uuid()) @db.Uuid
+  tenantId       String      @db.Uuid
+  number         String
+  customerId     String?     @db.Uuid
+  status         OrderStatus @default(draft)
+  currency       String
+  subtotalMinor  Int         @default(0)
+  shippingMinor  Int         @default(0)
+  totalMinor     Int         @default(0)
+  paymentAttempt Int         @default(0)
+  expiresAt      DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer       Customer?       @relation(fields: [customerId], references: [id])
+  items          OrderItem[]
+  paymentIntents PaymentIntent[]
+  ledgerEntries  LedgerEntry[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId, status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id             String  @id @default(uuid()) @db.Uuid
+  tenantId       String  @db.Uuid
+  orderId        String  @db.Uuid
+  variantId      String  @db.Uuid
+  title          String
+  quantity       Int
+  unitPriceMinor Int
+  order          Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant        Variant @relation(fields: [variantId], references: [id])
+
+  @@index([tenantId])
+  @@map("order_items")
+}
+
+model TenantPaymentConfig {
+  id                   String   @id @default(uuid()) @db.Uuid
+  tenantId             String   @db.Uuid
+  provider             String
+  enabled              Boolean  @default(true)
+  priority             Int      @default(100)
+  /// Chiffré par enveloppe côté application ; jamais de secret en clair ici.
+  credentialsEncrypted String?
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider])
+  @@map("tenant_payment_configs")
+}
+
+model PaymentIntent {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @db.Uuid
+  orderId        String        @db.Uuid
+  provider       String
+  method         String?
+  providerRef    String?
+  idempotencyKey String        @unique
+  amountMinor    Int
+  currency       String
+  status         PaymentStatus @default(pending)
+  redirectUrl    String?
+  /// Prochaine vérification serveur-à-serveur : le webhook local n'est pas fiable.
+  nextPollAt     DateTime?
+  pollAttempts   Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  order   Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  events  PaymentEvent[]
+  refunds Refund[]
+
+  @@unique([provider, providerRef])
+  @@index([tenantId, status])
+  @@index([status, nextPollAt])
+  @@map("payment_intents")
+}
+
+model PaymentEvent {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String?  @db.Uuid
+  paymentIntentId String?  @db.Uuid
+  provider        String
+  /// Idempotence structurelle des webhooks entrants.
+  providerEventId String
+  type            String
+  payload         Json
+  receivedAt      DateTime @default(now())
+  processedAt     DateTime?
+
+  paymentIntent PaymentIntent? @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerEventId])
+  @@index([tenantId])
+  @@map("payment_events")
+}
+
+model Refund {
+  id              String       @id @default(uuid()) @db.Uuid
+  tenantId        String       @db.Uuid
+  paymentIntentId String       @db.Uuid
+  amountMinor     Int
+  currency        String
+  status          RefundStatus @default(pending)
+  providerRef     String?
+  reason          String?
+  createdAt       DateTime     @default(now())
+
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@map("refunds")
+}
+
+/// Grand livre append-only : le solde marchand est toujours une somme, jamais un UPDATE.
+model LedgerEntry {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @db.Uuid
+  orderId     String?         @db.Uuid
+  payoutId    String?         @db.Uuid
+  type        LedgerEntryType
+  direction   LedgerDirection
+  amountMinor Int
+  currency    String
+  memo        String?
+  createdAt   DateTime        @default(now())
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order  Order?  @relation(fields: [orderId], references: [id])
+  payout Payout? @relation(fields: [payoutId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("ledger_entries")
+}
+
+model Payout {
+  id          String       @id @default(uuid()) @db.Uuid
+  tenantId    String       @db.Uuid
+  amountMinor Int
+  currency    String
+  method      String
+  destination String
+  status      PayoutStatus @default(requested)
+  providerRef String?
+  failureCode String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entries LedgerEntry[]
+
+  @@index([tenantId, status])
+  @@map("payouts")
+}
+
+model AuditLog {
+  id       String   @id @default(uuid()) @db.Uuid
+  tenantId String?  @db.Uuid
+  actorId  String?  @db.Uuid
+  action   String
+  target   String?
+  diff     Json?
+  ip       String?
+  at       DateTime @default(now())
+
+  @@index([tenantId, at])
+  @@map("audit_log")
+}
